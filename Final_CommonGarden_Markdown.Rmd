@@ -1,0 +1,1243 @@
+---
+title: "Final_CommonGarden_Markdown"
+author: "Austin Russell"
+date: "2025-04-01"
+output: html_document
+---
+
+
+baseline data setup 
+```{r}
+library(dada2) #call on dada2 package
+library(tidyverse) # call on package for data manipulating
+library(phyloseq) #package required for decontamination, also good for many analyses
+library(decontam) #'decontam
+
+setwd("~/Desktop/Aim 1+2/aims_1_2_seq") #set working directory
+
+
+path <- "fastq-primers-trimmed" #setting the relative path to the trimmed fastq files
+fns <- list.files(path, pattern=".fastq", full.names=TRUE) #defining the file names
+head(fns) #checking that I properly navigated to the correct path
+
+#now define the forward and reverse files
+fnFs <- list.files(path, pattern="_R1_001.fastq", full.names=TRUE)
+fnRs <- list.files(path, pattern="_R2_001.fastq", full.names=TRUE)
+head(fnFs)
+
+q_plot_F<-plotQualityProfile(fnFs[1:2]) #plot quality of forward reads, choosing first two samples and negatives
+
+pdf(paste("/Users/russ/Desktop/q_plot_F.pdf"), width = 10, height = 10)
+print(q_plot_F)
+dev.off()
+
+q_plot_R <- plotQualityProfile(fnRs[1:2]) #plot quality of reverse reads, choosing first two samples and negatives
+
+pdf(paste("/Users/russ/Desktop/q_plot_R.pdf"), width = 6, height = 4)
+print(q_plot_R)
+dev.off()
+
+#dereplication
+
+#filtering with default paramaters and truncating to length based on quality profiles
+filtFs <- file.path(path, "filtered", basename(fnFs)) #directory for filtered forward reads
+filtRs <- file.path(path, "filtered", basename(fnRs)) #directory for filtered reverse reads
+
+out <- filterAndTrim(fnFs, filtFs, fnRs, filtRs, truncLen=c(275, 225)) #fix truncLen based on quality score stuff
+
+#denoising and removing chimeras
+errF <- learnErrors(filtFs, multi=TRUE)
+errR <- learnErrors(filtRs, multi=TRUE)
+
+#plotting error models
+e_plot_F<-plotErrors(errF, nominalQ=TRUE)
+e_plot_R<-plotErrors(errR, nominalQ=TRUE)
+
+pdf(paste("/Users/russ/Desktop/e_plot_F.pdf"), width = 6, height = 4)
+print(e_plot_F)
+dev.off()
+
+pdf(paste("/Users/russ/Desktop/e_plot_R.pdf"), width = 6, height = 4)
+print(e_plot_R)
+dev.off()
+
+#DADA 
+ddF <- dada(filtFs, errF, pool="pseudo", multi=TRUE) #note the pseudopooling option and the detection of singletons is enabled
+ddR <- dada(filtRs, errR, pool="pseudo", multi=TRUE)
+
+merged <- mergePairs(ddF, filtFs, ddR, filtRs, verbose=TRUE, justConcatenate = FALSE) #concatenate (meshes reads together).  False bc i don't want concatenated. merge them bc there is overlap only not merge with miniseq bc no overlap
+
+#construct the table
+table.chimeras <- makeSequenceTable(merged)
+dim(table.chimeras)
+
+#remove chimeras
+table.no.chimeras <- removeBimeraDenovo(table.chimeras, multi=TRUE, verbose=TRUE)
+sum(table.no.chimeras)/sum(table.chimeras)
+
+#export this table as a text file
+write.table(t(table.no.chimeras), file = 'table.tsv', sep = "\t", row.names = TRUE, col.names=NA, quote=FALSE)
+
+#at this point I'd also like to export the sequences
+uniquesToFasta(table.no.chimeras, fout='rep-seqs.fasta', ids = colnames(table.no.chimeras))
+
+#check the pipeline (from primer removal and beyond)
+getN <- function(x) sum(getUniques(x))
+
+
+summary_tab <- data.frame(row.names=fnFs, dada2_input=out[,1],
+                          filtered=out[,2], ddF=sapply(ddF, getN),
+                          ddR=sapply(ddR, getN), merged=sapply(merged, getN),
+                          table.no.chimeras=rowSums(table.no.chimeras),
+                          final_perc_reads_retained=round(rowSums(table.no.chimeras)/out[,1]*100, 1))
+
+
+summary_tab
+
+
+track <- cbind(out, sapply(ddF, getN), sapply(ddR, getN), sapply(merged, getN), rowSums(table.no.chimeras))
+colnames(track) <- c("input", "filtered", "denoisedF", "denoisedR", "merged", "nonchim")
+rownames(track) <- basename(fnFs)
+head(track)
+write.csv(track, "pipeline_stats.csv")
+
+#CLASSIFYING TO ASSIGN TAXONOMY
+system.time(tax <- assignTaxonomy(table.no.chimeras, "silva_nr99_v138.1_train_set.fa.gz", 
+                                  multi=TRUE))
+unname(head(tax))
+
+write.table(tax, file = 'taxonomy.tsv', sep = "\t", row.names = TRUE, col.names=NA, quote=FALSE)
+
+#DECONTAMINATING
+#The method I am going to use removes sequences that occur more often in negative controls than they do in real samples.
+
+library(readxl)
+#reading in the metadata and creating a phyloseq object
+metadata <- read_xlsx("/Users/russ/Desktop/Aim 1+2/aims 1+2 seq data/metadata.xlsx") #importing the metadata
+#remove NAs from sequencing facility (positive samples that don't matter, and rename rows)
+metadata <- metadata[!is.na(metadata$seq_file), ]
+row.names(metadata) <- metadata$seq_file #altering its format so row names are the sample ids
+
+
+#creating a 'phyloseq' object
+trans_table.no.chimeras<-t(table.no.chimeras)
+otu<-otu_table(trans_table.no.chimeras, taxa_are_rows = TRUE)
+otu<-t(otu)
+samp<-sample_data(metadata)
+row.names(samp) <- samp$seq_file #altering its format so row names are the sample ids
+tax_tab<-tax_table(tax)
+#phyloseq is essentially a useful bunch of functions for making plots and conducting analyses with this sort of data
+ps <- phyloseq(otu, samp, tax_tab) #making the phyloseq object
+
+library(tidyverse) ; packageVersion("tidyverse") # 1.3.1
+library(phyloseq) ; packageVersion("phyloseq") # 1.22.3
+library(vegan) ; packageVersion("vegan") # 2.5.4
+library(viridis) ; packageVersion("viridis") # 0.5.1
+library(decontam)
+
+seqtab <- makeSequenceTable(merged)
+seqtab.nochim <- removeBimeraDenovo(seqtab, verbose=T) # Identified 1331 bimeras out of 5895 input sequences.
+
+asv_seqs <- colnames(seqtab.nochim)
+asv_headers <- vector(dim(seqtab.nochim)[2], mode="character")
+
+for (i in 1:dim(seqtab.nochim)[2]) {
+  asv_headers[i] <- paste(">ASV", i, sep="_")
+}
+
+# making and writing out a fasta of our final ASV seqs:
+asv_fasta <- c(rbind(asv_headers, asv_seqs))
+write(asv_fasta, "ASVs.fa")
+
+# count table:
+asv_tab <- t(seqtab.nochim)
+row.names(asv_tab) <- sub(">", "", asv_headers)
+write.table(asv_tab, "ASVs_counts.tsv", sep="\t", quote=F, col.names=NA)
+
+asv_tab<-table.no.chimeras
+asv_headers<-paste("ASV_",1:ncol(asv_tab))
+asv_seqs<-colnames(asv_tab)
+colnames(asv_tab)<-asv_headers
+
+library(DECIPHER)
+download.file(url="http://www2.decipher.codes/Classification/TrainingSets/SILVA_SSU_r138_2019.RData", destfile="SILVA_SSU_r138_2019.RData")
+
+## loading reference taxonomy object
+load("SILVA_SSU_r138_2019.RData")
+
+## loading DECIPHER
+library(DECIPHER)
+library(dada2)
+
+## creating DNAStringSet object of our ASVs
+dna <- DNAStringSet(getSequences(seqtab.nochim))
+
+## and classifying
+tax_info <- IdTaxa(test=dna, trainingSet=trainingSet, strand="both", processors=NULL)
+
+# tax table:
+# creating table of taxonomy and setting any that are unclassified as "NA"
+ranks <- c("domain", "phylum", "class", "order", "family", "genus", "species")
+asv_tax <- t(sapply(tax_info, function(x) {
+  m <- match(ranks, x$rank)
+  taxa <- x$taxon[m]
+  taxa[startsWith(taxa, "unclassified_")] <- NA
+  taxa
+}))
+colnames(asv_tax) <- ranks
+rownames(asv_tax) <- gsub(pattern=">", replacement="", x=asv_headers)
+
+write.table(asv_tax, "ASVs_taxonomy.tsv", sep = "\t", quote=F, col.names=NA)
+
+colnames(asv_tab) 
+
+contamdf.prev <- isContaminant(ps, method="prevalence", neg="negative")
+table(contamdf.prev$contaminant)
+
+#contam_df <- isContaminant(t(asv_tab), neg=metadata$negative) 
+
+table(contamdf.prev$contaminant)
+contam_asvs <- row.names(contamdf.prev[contamdf.prev$contaminant == TRUE, ])
+
+tax[row.names(asv_tab) %in% contam_asvs, ]
+
+asv_tab_no_contam <- asv_tab[!row.names(asv_tab) %in% contam_asvs, ]
+asv_tax_no_contam <- tax[(!row.names(tax) %in% contam_asvs), ]
+
+
+#asv_tab_no_contam<-asv_tab[asv_tab["primers-trimmed-GMCF-1240-Negative_S169_L001_R1_001.fastq",]==0,]
+#asv_tax_no_contam<-asv_tax_no_contam[row.names(asv_tab_no_contam),]
+
+
+asv_seq_headers_bind<-cbind(asv_seqs,row.names(asv_headers))
+colnames(blorp)[7]<-"SEQ"
+rownames(blorp)<-colnames(asv_tab)
+asv_tax<-blorp
+
+
+write(asv_fasta, "ASVs-no-contam.fa")
+write.table(asv_tab_no_contam, "ASVs_counts-no-contam.tsv",
+            sep="\t", quote=F, col.names=NA)
+write.table(asv_tax_no_contam, "ASVs_taxonomy-no-contam.tsv",
+            sep="\t", quote=F, col.names=NA)
+
+
+write(summary_tab, "sample_info.tsv")
+
+count_tab <- read.table("ASVs_counts-no-contam.tsv", header=T, row.names=1,
+                        check.names=F, sep="\t")[ , -c(1:4)]
+
+tax_tab <- as.matrix(read.table("ASVs_taxonomy-no-contam.tsv", header=T,
+                                row.names=1, check.names=F, sep="\t"))
+
+
+write.table(metadata, file = "sample_info.tsv", row.names=FALSE, sep="\t")
+
+
+sample_info_tab <- read.table("sample_info.tsv", header=T, row.names=1,
+                              check.names=F, sep="\t")                    
+
+# and setting the color column to be of type "character", which helps later
+sample_info_tab$color<- as.character(sample_info_tab$color)
+
+sample_info_tab
+
+#making sure species group is seen as a factor with levels
+ps@sam_data$wgs.class <- factor(ps@sam_data$wgs.class, levels = c("BCCH", "HYCH", "ADV.CA", "CACH"))
+
+
+#removing Chloroplast and mitochondria
+ps_nochloro <- ps %>%
+  subset_taxa(
+    Kingdom == "Bacteria" &                   #only bacteria
+      Family  != "mitochondria" &             #filter out mitochondria
+      Class   != "Chloroplast"                #filter out chloroplasts
+  )
+
+```
+
+
+
+subsetting time points and species groups 
+```{r}
+
+#seperating the aims 
+initial_ps <- subset_samples(ps, sample_names(ps) %in% sample_names(ps)[1:90])
+selffeeding_ps <- subset_samples(ps, sample_names(ps) %in% sample_names(ps)[91:147])
+presurgery_ps <- subset_samples(ps, sample_names(ps) %in% sample_names(ps)[148:220])
+
+
+#finding total reads 
+initial_otu_table <- otu_table(initial_ps)
+selffeed_otu_table <- otu_table(selffeeding_ps)
+presurg_otu_table <- otu_table(presurgery_ps)
+
+# Sum the counts across all samples
+initial_total_reads <- sum(initial_otu_table)
+selffeed_total_reads <- sum(selffeed_otu_table)
+presurg_total_reads <- sum(presurg_otu_table)
+
+# Print the total number of reads
+print(initial_total_reads)
+print(selffeed_total_reads)
+print(presurg_total_reads)
+
+
+# finding average number of reads per bird
+otu_table <- otu_table(presurgery_ps)
+total_reads <- sum(otu_table)
+num_samples <- ncol(otu_table)
+average_reads_per_sample <- total_reads / num_samples
+print(average_reads_per_sample)
+
+
+
+#ALL The same below ...
+#finding total number of phyla and genus for each species group at each collection time 
+bcch_tax_table <- tax_table(BCCH_ps)
+selffeed_tax_table <- tax_table(selffeeding_ps)
+presurg_tax_table <- tax_table(presurgery_ps)
+
+# Extract the phylum column
+initial_phyla <- bcch_tax_table[, "Phylum"]
+selffeed_phyla <- selffeed_tax_table[, "Genus"]
+presurg_phyla <- presurg_tax_table[, "Genus"]
+
+# Count the unique phylum names
+total_initial_phyla <- length(unique(initial_phyla))
+total_selffeed_phyla <- length(unique(selffeed_phyla))
+total_presurg_phyla <- length(unique(presurg_phyla))
+
+# Print the total number of phyla
+print(total_initial_phyla)
+print(total_selffeed_phyla)
+print(total_presurg_phyla)
+
+```
+
+
+average all the individuals in each group and in each nest_site to see initial species and geographical GM variation 
+*insert different collection time points for analysis 
+```{r}
+library(phyloseq)
+library(dplyr)
+library(ggplot2)
+library(RColorBrewer)
+
+# Define desired orders
+desired_order_wgs <- c("BCCH", "HYCH", "ADV.CA", "CACH") # Replace with your actual groups
+desired_order_nest <- c("HickoryRun", "TwinLakes", "Tuscarora", "Jacobsburg", "SouthMtn", "Desales", "Nockamixon", "PeaceValley", "Nolde") 
+
+# Add Deinococcota to the fixed color scheme
+fixed_colors <- c(brewer.pal(12, "Set3"), brewer.pal(8, "Dark2"), "gray")
+names(fixed_colors) <- c("Firmicutes", "Proteobacteria", "Bacteroidota", "Bdellovibrionota", "Actinobacteriota", 
+                         "Fusobacteriota", "Cyanobacteria", "Chloroflexi", "Verrucomicrobiota", "Planctomycetota", 
+                         "Gemmatimonadota", "Patescibacteria", "Dependentiae","Deinococcota", "Nitrospirota", "Myxococcota", 
+                         "Acidobacteriota", "Desulfobacterota", "Other")
+
+
+# Use psmelt to convert phyloseq object to a data frame
+melted_df <- psmelt(selffeeding_ps_nochloro)
+
+# Filter out samples with NA in wgs.class or Nest_Site
+melted_df <- melted_df %>%
+  filter(!is.na(wgs.class) & !is.na(Nest_Site))
+#factor based on the levels
+melted_df$wgs.class <- factor(melted_df$wgs.class, levels = desired_order_wgs)
+melted_df$Nest_Site <- factor(melted_df$Nest_Site, levels = desired_order_nest)
+
+# Calculate the mean relative abundance for each phylum
+mean_abund <- melted_df %>%
+  group_by(Phylum) %>%
+  summarize(MeanAbundance = mean(Abundance, na.rm = TRUE)) %>%
+  arrange(desc(MeanAbundance))
+
+# Identify the top 10 most abundant phyla
+top10_phyla <- mean_abund$Phylum[1:10]
+
+# Modify the data frame to group all other phyla into "Other"
+melted_df <- melted_df %>%
+  mutate(Phylum = ifelse(Phylum %in% top10_phyla, Phylum, "Other"))
+
+# Summarize the data by wgs.class and phylum
+abund_long_wgs <- melted_df %>%
+  group_by(wgs.class, Phylum) %>%
+  summarize(Abundance = mean(Abundance)) %>%
+  ungroup()
+
+# Create the bar plot for wgs.class
+topphyla_barplot_wgs <- ggplot(abund_long_wgs, aes(x = wgs.class, y = Abundance, fill = Phylum)) +
+  geom_col(position = "fill") +
+  labs(x = "wgs.class", y = "% of 16S rRNA gene copies recovered", 
+       title = "Relative Abundance of Top 10 Phyla and Others by wgs.class") +
+  scale_fill_manual(values = fixed_colors, name = "Phylum", breaks = c(top10_phyla, "Other")) +
+  theme_minimal() +
+  theme(axis.text.x = element_text(angle = 90, hjust = 1))
+
+print(topphyla_barplot_wgs)
+
+# Save the plot to a PDF
+pdf("/Users/russ/Desktop/topphyla_barplot_wgs.pdf", width = 15, height = 10)
+print(topphyla_barplot_wgs)
+dev.off()
+
+# Summarize the data by Nest_Site and phylum
+abund_long_nest <- melted_df %>%
+  group_by(Nest_Site, Phylum) %>%
+  summarize(Abundance = mean(Abundance)) %>%
+  ungroup()
+
+# Create the bar plot for Nest_Site
+topphyla_barplot_nest <- ggplot(abund_long_nest, aes(x = Nest_Site, y = Abundance, fill = Phylum)) +
+  geom_col(position = "fill") +
+  labs(x = "Nest_Site", y = "% of 16S rRNA gene copies recovered", 
+       title = "Relative Abundance of Top 10 Phyla and Others by Nest_Site") +
+  scale_fill_manual(values = fixed_colors, name = "Phylum", breaks = c(top10_phyla, "Other")) +
+  theme_minimal() +
+  theme(axis.text.x = element_text(angle = 90, hjust = 1))
+
+print(topphyla_barplot_nest)
+
+# Save the plot to a PDF
+pdf("/Users/russ/Desktop/topphyla_barplot_nest.pdf", width = 15, height = 10)
+print(topphyla_barplot_nest)
+dev.off()
+
+```
+
+alpha and beta diversity testing 
+```{r}
+library(vegan)
+library(dplyr)
+
+#alpha diversity measures
+shannon_diversity<-estimate_richness(ps_nochloro, measures = "shannon")
+chao1<- estimate_richness(ps_nochloro, measures = "Chao1")
+richness<- estimate_richness(ps_nochloro, measures = "Observed")
+
+# Bray-Curtis dissimilarity
+bray <- phyloseq::distance(ps_nochloro, method = "bray")
+
+# Jaccard dissimilarity
+jaccard <- phyloseq::distance(ps_nochloro, method = "jaccard")
+
+#perform PERMANOVA
+permanova_result <- adonis2(bray ~ wgs.class+collection_time+Collection_year+Sex, data = meta_data, permutations = 10000, na.action = "na.exclude", by = "margin", strata = meta_data$band_id)
+print(permanova_result)
+
+#perform PERMANOVA
+permanova_result <- adonis2(jaccard ~ wgs.class+collection_time+Collection_year+Sex, data = meta_data, permutations = 10000, na.action = "na.exclude", by = "margin", strata = meta_data$band_id)
+print(permanova_result)
+
+
+```
+
+graph for alpha diversity differences
+*input diff aspects of alpha diversity for graphing 
+```{r}
+#cleaner graph for collection time on x axis and alpha diversity on the y axis 
+library(ggplot2)
+
+asvnum1 <- ggplot(diversity_df, aes(x = wgs.class, y = OTUs, fill = wgs.class)) +
+  geom_boxplot() +
+  labs(
+    x = "Ancestry",
+    y = "Chao Diversity",
+    fill = "Ancestry",
+    title = "Distribution of ASVs by Ancestry"
+  ) +
+  theme_minimal(base_size = 14) + # Clean, modern theme with a slightly larger font size
+  theme(
+    plot.title = element_text(
+      hjust = 0.5, face = "bold", size = 16, color = "black", margin = margin(b = 10)
+    ), # Title styling
+    plot.title.position = "plot", # Ensures the title is placed at the top
+    plot.title.background = element_rect(
+      fill = "lightblue", color = "black", linewidth = 1
+    ), # Adds a box behind the title
+    panel.border = element_rect(color = "black", fill = NA, linewidth = 1), # Outline around the graph
+    axis.title = element_text(face = "bold"),
+    axis.text = element_text(color = "black"),
+    legend.position = "top", # Moves legend to the top for better space management
+    legend.background = element_rect(color = "black", fill = "white", linewidth = 0.5),
+    legend.box.margin = margin(t = 5, b = 5)
+  ) +
+  scale_fill_brewer(palette = "Set2")+
+  theme_cowplot(12)
+
+print(asvnum1)
+```
+
+
+PCoA graphing 
+*input diff distance matrix for each graph
+```{r}
+# Load necessary libraries
+library(phyloseq)
+library(ggplot2)
+library(vegan)  # For PCoA analysis
+library(ggpubr) # For adding ellipses
+
+# Extract the sample data
+sample_data_df <- as.data.frame(sample_data(ps_nochloro))
+
+# Remove rows with NAs in collection_time or wgs.class
+sample_data_df <- sample_data_df[!is.na(sample_data_df$collection_time) & !is.na(sample_data_df$wgs.class), ]
+
+# Subset the phyloseq object to remove samples with NA values
+ps_nochloro_filtered <- prune_samples(rownames(sample_data_df), ps_nochloro)
+
+# Perform PCoA analysis on the filtered data
+ordination <- ordinate(ps_nochloro_filtered, method = "PCoA", distance = "bray")
+
+point_colors <- c("initial" = "", "self_feeding" = "", "pre_surgery" = "")
+fill_colors <- c("BCCH" = "aquamarine3", "HYCH" = "chocolate1", "ADV.CA" = "cornflowerblue", "CACH" = "pink3")
+
+# Create the PCoA plot
+pcoa_plot <- plot_ordination(ps_nochloro_filtered, ordination, type = "samples") +
+  geom_point(aes(shape = collection_time, color = wgs.class), size = 3) +  
+  stat_ellipse(aes(group = wgs.class, fill = wgs.class), 
+               geom = "polygon", alpha = 0.2) +   
+  scale_fill_manual(values = fill_colors) +  # Provide colors for ellipses
+  scale_color_manual(values = fill_colors) + # Provide colors for points
+  theme_minimal() +
+  labs(title = "PCoA of Microbial Communities",
+       shape = "Collection Time", color = "Collection Time")
+
+# Display the plot
+print(pcoa_plot)
+
+```
+
+chloroplast subsetting 
+```{r}
+library(phyloseq)
+library(dplyr)
+
+  # Convert tax_table to a data frame
+  tax_df <- as.data.frame(tax_table(ps))
+  
+  # Identify ASVs that belong to the "Chloroplast" order
+  chloroplast_asvs <- rownames(tax_df[tax_df$Order == "Chloroplast", ])
+  
+  # Subset the phyloseq object using these ASVs
+  chloro_ps <- prune_taxa(chloroplast_asvs, ps)
+
+
+# Inspect the subsetted object
+print(chloro_ps)
+
+
+#subsetting the new chloroplast phyloseq to just the specific time points
+initial_chloro_ps <- subset_samples(chloro_ps, chloro_ps@sam_data$collection_time == "initial")
+selffeed_chloro_ps <- subset_samples(chloro_ps, chloro_ps@sam_data$collection_time == "self_feeding")
+presurg_chloro_ps <- subset_samples(chloro_ps, chloro_ps@sam_data$collection_time == "pre_surgery")
+
+
+```
+
+
+grpahing chloroplast data
+```{r}
+library(phyloseq)
+library(dplyr)
+library(tidyr)
+library(ggplot2)
+library(RColorBrewer)
+
+# Convert phyloseq object to data frame
+abund_df <- as.data.frame(otu_table(initial_chloro_ps))
+meta_data <- as(sample_data(initial_chloro_ps), "data.frame")
+
+# Combine abundance data with metadata
+abund_df <- cbind(SampleID = rownames(abund_df), abund_df)
+
+#fix the seq_file name to also be SampleID
+meta_data <- as(sample_data(initial_chloro_ps), "data.frame")
+colnames(meta_data)[colnames(meta_data) == "seq_file"] <- "SampleID"
+
+# Convert abundance data to long format and join with metadata
+abund_long <- abund_df %>%
+  pivot_longer(-SampleID, names_to = "ASV", values_to = "Abundance") %>%
+  merge(meta_data, by = "SampleID")
+
+# Calculate relative abundance
+abund_long <- abund_long %>%
+  group_by(SampleID) %>%
+  mutate(RelativeAbundance = Abundance / sum(Abundance, na.rm = TRUE)) %>%
+  ungroup()
+
+# Summarize relative abundance by wgs.class and Nest_Site
+abund_wgs <- abund_long %>%
+  group_by(wgs.class, ASV) %>%
+  summarize(RelativeAbundance = mean(RelativeAbundance, na.rm = TRUE)) %>%
+  arrange(wgs.class, desc(RelativeAbundance))
+
+abund_nest <- abund_long %>%
+  group_by(Nest_Site, ASV) %>%
+  summarize(RelativeAbundance = mean(RelativeAbundance, na.rm = TRUE)) %>%
+  arrange(Nest_Site, desc(RelativeAbundance))
+
+# Define the number of top ASVs to select
+top_n <- 10
+
+# Top ASVs for each wgs.class
+top_asvs_wgs <- abund_wgs %>%
+  group_by(wgs.class) %>%
+  slice_max(order_by = RelativeAbundance, n = top_n, with_ties = FALSE) %>%
+  ungroup()
+
+# Top ASVs for each Nest_Site
+top_asvs_nest <- abund_nest %>%
+  group_by(Nest_Site) %>%
+  slice_max(order_by = RelativeAbundance, n = top_n, with_ties = FALSE) %>%
+  ungroup()
+
+# Create a lookup table for ASVs to shorter names
+asv_lookup_nest <- data.frame(
+  ASV = unique(top_asvs_nest$ASV),
+  ShortName = paste0("ASV", seq_along(unique(top_asvs_nest$ASV)))
+)
+
+# Create a lookup table for ASVs to shorter names
+asv_lookup_wgs <- data.frame(
+  ASV = unique(top_asvs_wgs$ASV),
+  ShortName = paste0("ASV", seq_along(unique(top_asvs_wgs$ASV)))
+)
+
+# Join the lookup table with the top ASVs data
+top_asvs_nest <- top_asvs_nest %>%
+  left_join(asv_lookup_nest, by = "ASV")
+
+# Join the lookup table with the top ASVs data
+top_asvs_wgs <- top_asvs_wgs %>%
+  left_join(asv_lookup_wgs, by = "ASV")
+
+
+# Plot top ASVs for each Nest_Site based on relative abundance
+wgs.class_chloro_asv<-ggplot(top_asvs_wgs, aes(x = reorder(ShortName, RelativeAbundance), y = RelativeAbundance, fill = wgs.class)) +
+  geom_bar(stat = "identity") +
+  facet_wrap(~ wgs.class, scales = "free_x") +
+  labs(x = "ASV", y = "Relative Abundance", title = "Top 10 ASVs for Each Species Group (Relative Abundance)") +
+  theme(axis.text.x = element_text(angle = 90, hjust = 1), legend.position = "none") +
+  scale_fill_brewer(palette = "Set3")
+
+print(wgs.class_chloro_asv)
+
+# Save the plot to a PDF
+pdf("/Users/russ/Desktop/wgs.class_chloro_asv.pdf", width = 15, height = 30)
+print(wgs.class_chloro_asv)
+dev.off()
+
+# Plot top ASVs for each Nest_Site based on relative abundance
+nest_chloro_asv<-ggplot(top_asvs_nest, aes(x = reorder(ShortName, RelativeAbundance), y = RelativeAbundance, fill = Nest_Site)) +
+  geom_bar(stat = "identity") +
+  facet_wrap(~ Nest_Site, scales = "free_x") +
+  labs(x = "ASV", y = "Relative Abundance", title = "Top 10 ASVs for Each Nest_Site (Relative Abundance)") +
+  theme(axis.text.x = element_text(angle = 90, hjust = 1), legend.position = "none") +
+  scale_fill_brewer(palette = "Set3")
+print(nest_chloro_asv)
+
+# Save the plot to a PDF
+pdf("/Users/russ/Desktop/nest_chloro_asv.pdf", width = 15, height = 30)
+print(nest_chloro_asv)
+dev.off()
+
+```
+
+
+
+running PERMANOVA stats chloro phyloseq 
+```{r}
+#PERMANOVA of beta diversity ordination plot 
+library(vegan)
+
+#set meta_data
+meta_data<-sample_data(chloro_ps)
+meta_data <- data.frame(as(meta_data, "matrix"))
+
+
+# Bray-Curtis dissimilarity
+bray <- phyloseq::distance(chloro_ps, method = "bray")
+
+# Jaccard dissimilarity
+jaccard <- phyloseq::distance(chloro_ps, method = "jaccard")
+
+# Add a small value to all zero entries
+bray[bray == 0] <- 0.0001
+bray[is.na(bray)] <- 0.0001
+
+jaccard[jaccard == 0] <- 0.0001
+jaccard[is.na(jaccard)] <- 0.0001
+
+#perform PERMANOVA
+permanova_result <- adonis2(bray ~ wgs.class+Collection_year+Sex+collection_time, data = meta_data, permutations = 10000, na.action = "na.exclude", by = "margin")
+print(permanova_result)
+
+```
+
+
+alpha diversity of chloroplast 
+```{r}
+shannon_diversity<-estimate_richness(presurg_chloro_ps, measures = "shannon")
+inverse_simpson_index <- estimate_richness(presurg_chloro_ps, measures = "InvSimpson")
+chao1<- estimate_richness(presurg_chloro_ps, measures = "Chao1")
+richness<- estimate_richness(presurg_chloro_ps, measures = "Observed")
+
+# Calculate diversity measures
+diversity_df_chloro <- data.frame(
+  SampleID = sample_names(presurg_chloro_ps),
+  Shannon = estimate_richness(presurg_chloro_ps, measures = "Shannon")[, "Shannon"],
+  Chao = estimate_richness(presurg_chloro_ps, measures = "Chao1")[, "Chao1"],
+  Richness = estimate_richness(presurg_chloro_ps, measures = "Observed")[, "Observed"],
+  OTUs = otu_table(presurg_chloro_ps) %>% rowSums()
+)
+
+#making the metadata object and confirming dataframes 
+meta_data<-sample_data(presurg_chloro_ps)
+meta_data <- data.frame(as(meta_data, "matrix"))
+diversity_df_chloro<-as.data.frame(diversity_df_chloro)
+
+# Rename seq_file to SampleID in meta_data
+colnames(meta_data)[colnames(meta_data) == "seq_file"] <- "SampleID"
+
+# Combine with metadata
+diversity_df_chloro <- merge(diversity_df_chloro, meta_data, by = "SampleID")
+
+# Filter out NAs
+diversity_df_chloro <- diversity_df_chloro %>%
+  filter(!is.na(wgs.class) & !is.na(collection_time))
+
+# Set desired order for wgs.class and collection_time
+desired_order_wgs <- c("BCCH", "HYCH", "ADV.CA", "CACH") 
+diversity_df_chloro$wgs.class <- factor(diversity_df_chloro$wgs.class, levels = desired_order_wgs)
+desired_order_collection_time <- c("initial", "self_feeding", "pre_surgery") 
+diversity_df_chloro$collection_time <- factor(diversity_df_chloro$collection_time, levels = desired_order_collection_time)
+
+
+
+#making sure the variables are seen as factors not characters 
+diversity_df_chloro$wgs.class<-as.factor(diversity_df_chloro$wgs.class)
+diversity_df_chloro$collection_time<-as.factor(diversity_df_chloro$collection_time)
+diversity_df_chloro$Collection_year<-as.factor(diversity_df_chloro$Collection_year)
+diversity_df_chloro$Sex<-as.factor(diversity_df_chloro$Sex)
+diversity_df_chloro$Nest_Site<-as.factor(diversity_df_chloro$Nest_Site)
+diversity_df_chloro$Nest<-as.factor(diversity_df_chloro$Nest)
+
+
+
+
+#SHANNON DIVERSITY
+#simplified version
+shan.init <- lmer(Shannon ~ wgs.class + Nest_Site + Collection_year + (1|Nest) + (1|Sex), data = diversity_df_chloro)
+summary(shan.init)
+#check the Anova 
+Anova(shan.init)
+
+
+#CHAO DIVERSITY
+#simplified version
+chao.init <- lmer(Chao ~ wgs.class + Nest_Site + Collection_year +  (1|Nest) + (1|Sex), data = diversity_df_chloro)
+summary(chao.init)
+#check the Anova 
+Anova(chao.init)
+
+
+#OBSERVED RICHNESS
+#simplified version
+rich.full <- lmer(Richness ~ wgs.class + Nest_Site + Collection_year + (1|Nest) + (1|Sex), data = diversity_df_chloro)
+summary(rich.full)
+#check the Anova 
+Anova(rich.full)
+
+
+#NUMBER OF ASVs
+#simplified version
+asvnum.init <- lmer(OTUs ~ wgs.class + Nest_Site + Collection_year +  (1|Nest) + (1|Sex), data = diversity_df_chloro)
+summary(asvnum.init)
+#check the Anova 
+Anova(asvnum.init)
+
+```
+
+
+post hoc tests for the chloroplast data ALPHA
+```{r}
+library(emmeans)
+# checking post hoc after the linear mixed effects above 
+
+# Visualize interaction while accounting for nesting
+#shan_emm<-emmip(shan.init, ~ wgs.class | Nest_Site)
+
+# Get the estimated marginal means for the main effects and interactions
+emmeans_results <- emmeans(chao.init, pairwise ~ wgs.class)
+
+# Perform pairwise comparisons (adjust method can be changed as needed)
+contrast_results <- pairs(emmeans_results, adjust = "tukey")
+
+# Print the results
+summary(contrast_results)
+
+```
+
+post hoc tests for the chloroplast data BETA
+```{r}
+library(vegan)
+#set meta_data
+meta_data<-sample_data(presurg_chloro_ps)
+meta_data <- data.frame(as(meta_data, "matrix"))
+
+
+# Bray-Curtis dissimilarity
+bray <- phyloseq::distance(chloro_ps, method = "bray")
+
+# Jaccard dissimilarity
+jaccard <- phyloseq::distance(chloro_ps, method = "jaccard")
+
+# Add a small value to all zero entries
+bray[bray == 0] <- 0.0001
+bray[is.na(bray)] <- 0.0001
+
+jaccard[jaccard == 0] <- 0.0001
+jaccard[is.na(jaccard)] <- 0.0001
+
+
+
+meta_data_clean <- meta_data[!is.na(meta_data$collection_time), ]
+
+jaccard_clean <- as.dist(as.matrix(jaccard)[rownames(meta_data_clean), rownames(meta_data_clean)])
+
+bray_clean <- as.dist(as.matrix(bray)[rownames(meta_data_clean), rownames(meta_data_clean)])
+
+# Assuming jaccard_clean is the distance matrix and collection_time is the grouping variable
+dispersion_test <- betadisper(jaccard_clean, meta_data_clean$Collection_year)
+
+dispersion_result <- anova(dispersion_test)
+print(dispersion_result)
+
+pairwise_dispersion <- TukeyHSD(dispersion_test)
+print(pairwise_dispersion)
+
+```
+
+
+differential abundance of top 10 ASVs using ANCOMBC 
+*insert each different subset of groupings to find significant ASVs for each ancestry group or collection time 
+```{r}
+library(ANCOMBC)
+library(phyloseq)
+
+
+# Subset top 10 ASVs
+top10_asvs <- head(order(-colSums(abund_df)), 10)
+top10_ps <- subset_taxa(initial_ps, taxa_names(initial_ps) %in% top10_asvs)
+
+library(ANCOMBC)
+
+
+# Run ANCOMBC analysis
+full_ancombc_collectime <- ancombc2(data = ps_nochloro, tax_level = "Genus", fix_formula = "collection_time", p_adj_method = "holm", group = "collection_time", global = TRUE)
+
+print(full_ancombc_collectime$res_global)
+
+# Extract significant ASVs based on q-value threshold
+significant_asvs <- rownames(full_ancombc_collectime$res_global)[full_ancombc_collectime$res_global$q_val < 0.05]
+print(significant_asvs)
+
+# Extract q-values for the significant ASVs using row names
+significant_q_vals <- full_ancombc_collectime$res_global$q_val[rownames(full_ancombc_collectime$res_global) %in% significant_asvs]
+
+# Extract the rows corresponding to significant ASVs
+res_global_stats <- full_ancombc_collectime$res_global[rownames(full_ancombc_collectime$res_global) %in% significant_asvs, ]
+
+# Export the results to a CSV file
+write.csv(res_global_stats, "/Users/russ/Desktop/significant_asvs_with_taxonomy.csv", row.names = FALSE)
+
+# Print the data frame to check the output
+print(res_global_stats)
+
+```
+
+
+finding the significant asv and putting them in their own object for a differential abundance graph 
+```{r}
+
+# Step 1: Access and modify the sample data
+ancomb_ps@sam_data$wgs.class <- as.factor(ancomb_ps@sam_data$wgs.class)
+
+# Step 2: Filter out samples with NA in wgs.class
+filtered_samples_wgs <- !is.na(sample_data(ancomb_ps)$wgs.class)
+
+# Step 3: Prune the phyloseq object to only keep samples without NA in wgs.class
+ancomb_ps_filtered_wgs <- prune_samples(filtered_samples_wgs, ancomb_ps)
+
+# Step 4: Run ANCOMBC analysis across the wgs.class groups
+full_ancombc_wgs <- ancombc2(
+  data = ancomb_ps_filtered_wgs, 
+  tax_level = "Genus", 
+  fix_formula = "wgs.class",  # Change to compare wgs.class groups
+  rand_formula = "(1 | collection_time)",  # You can keep collection_time in the random formula if it's relevant
+  p_adj_method = "holm", 
+  pseudo = 0, 
+  pseudo_sens = TRUE, 
+  group = "wgs.class",  # Change to group by wgs.class
+  global = TRUE, 
+  pairwise = TRUE, 
+  dunnet = TRUE
+)
+
+
+
+library(ggplot2)
+library(dplyr)
+library(tidyr)
+
+# Set to dataframe
+df_results <- as.data.frame(full_ancombc_wgs$res)  # Use the correct ANCOMBC result
+
+# Reshape data for ggplot
+df_results_long <- df_results %>%
+  pivot_longer(
+    cols = starts_with("lfc_"),  # Selecting log fold change columns
+    names_to = "comparison",  # Creating a new column for comparison (based on wgs.class)
+    names_prefix = "lfc_",  # Removing the "lfc_" prefix from names
+    values_to = "log_fold_change"  # The values are the log fold changes
+  ) %>%
+  pivot_longer(
+    cols = starts_with("se_"),
+    names_to = "se_comparison",
+    names_prefix = "se_",  # Adjust for the standard error prefix
+    values_to = "se"
+  ) %>%
+  pivot_longer(
+    cols = starts_with("p_"),
+    names_to = "p_comparison",
+    names_prefix = "p_",  # Adjust for the p-value prefix
+    values_to = "p_value"
+  ) %>%
+  filter(comparison == se_comparison & comparison == p_comparison) %>%  # Matching comparisons across columns
+  mutate(
+    significance = case_when(
+      p_value < 0.001 ~ "***",
+      p_value < 0.01 ~ "**",
+      p_value < 0.05 ~ "*",
+      TRUE ~ ""
+    ),
+    lower_ci = log_fold_change - 1.96 * se,  # Calculating 95% CI
+    upper_ci = log_fold_change + 1.96 * se
+  )
+
+
+
+library(dplyr)
+library(tidyr)
+library(ggplot2)
+
+# Select relevant columns from df_results for wgs.class comparisons
+df_comparison <- df_results %>%
+    dplyr::select(taxon, 
+                  lfc_wgs.classHYCH, 
+                  lfc_wgs.classADV.CA,
+                  lfc_wgs.classCACH,
+                  se_wgs.classHYCH, 
+                  se_wgs.classADV.CA, 
+                  se_wgs.classCACH, 
+                  passed_ss_wgs.classHYCH, 
+                  passed_ss_wgs.classADV.CA, 
+                  passed_ss_wgs.classCACH)
+
+# Create df_fig_comparison by pivoting the necessary columns
+df_fig_comparison <- df_comparison %>%
+    pivot_longer(
+        cols = starts_with("lfc_wgs.class"),  # Pivot the log fold changes for wgs.class
+        names_to = "comparison", 
+        names_prefix = "lfc_wgs.class",  # Remove prefix to clean up comparison names
+        values_to = "log_fold_change"
+    ) %>%
+    pivot_longer(
+        cols = starts_with("se_wgs.class"),  # Pivot the standard errors for wgs.class
+        names_to = "se_comparison", 
+        names_prefix = "se_wgs.class",  # Remove prefix to clean up SE comparison names
+        values_to = "se"
+    ) %>%
+    # Filter to match the comparison in log fold change and SE
+    filter(comparison == se_comparison) %>%
+    # Add passed significance status for each comparison
+    mutate(
+        passed_ss = case_when(
+            comparison == "HYCH" ~ passed_ss_wgs.classHYCH,
+            comparison == "ADV.CA" ~ passed_ss_wgs.classADV.CA,
+            comparison == "CACH" ~ passed_ss_wgs.classCACH,
+            TRUE ~ NA
+        ),
+        direct = ifelse(log_fold_change > 0, "Positive LFC", "Negative LFC"),
+        color = ifelse(passed_ss == TRUE, "aquamarine3", "black")
+    ) %>%
+    arrange(desc(log_fold_change))
+
+# Create the plot with different wgs.class comparisons
+fig_comparison <- ggplot(df_fig_comparison, aes(x = reorder(taxon, log_fold_change), y = log_fold_change, fill = direct)) + 
+    geom_bar(stat = "identity", width = 0.7, color = "black", 
+             position = position_dodge(width = 0.4)) +
+    geom_errorbar(aes(ymin = log_fold_change - se, ymax = log_fold_change + se), 
+                  width = 0.2, position = position_dodge(0.4), color = "black") + 
+    facet_wrap(~ comparison, scales = "free", ncol = 1) +  # Separate panels for each wgs.class comparison
+    labs(x = NULL, y = "Log Fold Change", 
+         title = "Log Fold Changes for WGS Class Comparisons (HYCH, ADV.CA, CACH)") + 
+    scale_fill_discrete(name = NULL) +
+    theme_bw() + 
+    theme(
+        plot.title = element_text(hjust = 0.5),
+        panel.grid.minor.y = element_blank(),
+        axis.text.x = element_text(angle = 60, hjust = 1, color = df_fig_comparison$color)
+    ) +
+    coord_cartesian(ylim = c(-4, 4))  # Set y-axis limits
+
+# Display the figure
+print(fig_comparison)
+
+# Save the plot to a PDF
+pdf("/Users/russ/Desktop/fig_comparison_wgs_class.pdf", width = 10, height = 20)
+print(fig_comparison)
+dev.off()
+
+
+```
+
+
+
+differential abundance graphs 
+```{r}
+library(dplyr)
+library(tidyr)
+library(ggplot2)
+
+# Select relevant columns from df_results for wgs.class comparisons, including p-values
+df_comparison <- df_results %>%
+    dplyr::select(taxon, 
+                  lfc_wgs.classHYCH, 
+                  lfc_wgs.classADV.CA,
+                  lfc_wgs.classCACH,
+                  se_wgs.classHYCH, 
+                  se_wgs.classADV.CA, 
+                  se_wgs.classCACH, 
+                  p_wgs.classHYCH,
+                  p_wgs.classADV.CA,
+                  p_wgs.classCACH)
+
+# Create df_fig_comparison by pivoting the necessary columns
+df_fig_comparison <- df_comparison %>%
+    pivot_longer(
+        cols = starts_with("lfc_wgs.class"),  # Pivot the log fold changes for wgs.class
+        names_to = "comparison", 
+        names_prefix = "lfc_wgs.class",  # Remove prefix to clean up comparison names
+        values_to = "log_fold_change"
+    ) %>%
+    pivot_longer(
+        cols = starts_with("se_wgs.class"),  # Pivot the standard errors for wgs.class
+        names_to = "se_comparison", 
+        names_prefix = "se_wgs.class",  # Remove prefix to clean up SE comparison names
+        values_to = "se"
+    ) %>%
+    pivot_longer(
+        cols = starts_with("p_wgs.class"),  # Pivot the p-values for wgs.class
+        names_to = "p_comparison", 
+        names_prefix = "p_wgs.class",  # Remove prefix to clean up p-value names
+        values_to = "p_value"
+    ) %>%
+    # Filter to match the comparison in log fold change, SE, and p-value
+    filter(comparison == se_comparison & comparison == p_comparison) %>%
+    # Add passed significance status for each comparison
+    mutate(
+        passed_ss = case_when(
+            comparison == "HYCH" ~ p_value < 0.05,
+            comparison == "ADV.CA" ~ p_value < 0.05,
+            comparison == "CACH" ~ p_value < 0.05,
+            TRUE ~ NA
+        ),
+        direct = ifelse(log_fold_change > 0, "Positive LFC", "Negative LFC"),
+        color = ifelse(passed_ss == TRUE, "aquamarine3", "black")
+    ) %>%
+    arrange(desc(log_fold_change))
+
+# Filter for significant p-values (p < 0.05)
+df_significant <- df_fig_comparison %>%
+    filter(passed_ss == TRUE)
+
+# View the significant genera
+significant_genera <- df_significant %>%
+    dplyr::select(taxon, comparison, log_fold_change, p_value) %>%
+    arrange(comparison, log_fold_change)
+
+# Print the significant genera
+print(significant_genera)
+
+# Optional: Create a plot highlighting the significant genera
+fig_significant <- ggplot(df_significant, aes(x = reorder(taxon, log_fold_change), y = log_fold_change, fill = direct)) + 
+    geom_bar(stat = "identity", width = 0.7, color = "black", 
+             position = position_dodge(width = 0.4)) +
+    geom_errorbar(aes(ymin = log_fold_change - se, ymax = log_fold_change + se), 
+                  width = 0.2, position = position_dodge(0.4), color = "black") + 
+    facet_wrap(~ comparison, scales = "free", ncol = 1) +  # Separate panels for each wgs.class comparison
+    labs(x = NULL, y = "Log Fold Change", 
+         title = "Significant Genera in WGS Class Comparisons (HYCH, ADV.CA, CACH)") + 
+    scale_fill_discrete(name = NULL) +
+    theme_bw() + 
+    theme(
+        plot.title = element_text(hjust = 0.5),
+        panel.grid.minor.y = element_blank(),
+        axis.text.x = element_text(angle = 60, hjust = 1, color = df_significant$color)
+    ) +
+    coord_cartesian(ylim = c(-4, 4))  # Set y-axis limits
+
+# Display the plot
+print(fig_significant)
+
+# Optional: Save the significant plot to a PDF
+pdf("/Users/russ/Desktop/significant_genera_wgs_class.pdf", width = 10, height = 20)
+print(fig_significant)
+dev.off()
+
+```
+
+
+making a graph with the ancombc results 
+```{r}
+# Load necessary libraries
+library(dplyr)
+
+# Extract OTU and taxonomy tables
+abundance_matrix <- otu_table(presurgery_ps_nochloro)
+taxonomy_df <- tax_table(presurgery_ps_nochloro)
+
+# Convert OTU table to data frame and rename columns to ASV_1, ASV_2, etc.
+abundance_df <- as.data.frame(abundance_matrix)
+asv_seqs <- colnames(abundance_df)
+
+# Create ASV headers like ASV_1, ASV_2
+asv_headers <- paste0("ASV_", seq_along(asv_seqs))
+colnames(abundance_df) <- asv_headers
+
+# Convert taxonomy table to a data frame and move rownames (ASV names) to the first column
+taxonomy_df <- as.data.frame(taxonomy_df)
+asv_headers <- paste0("ASV_", seq_along(asv_seqs))
+rownames(taxonomy_df) <- asv_headers
+
+abundance_df<-t(abundance_df)
+
+# Merge OTU and taxonomy tables (rows from taxonomy_df and columns from abundance_df)
+abundance_taxa_df <- cbind(taxonomy_df, abundance_df)
+
+# Ensure that abundance_taxa_df is a data frame
+abundance_taxa_df <- as.data.frame(abundance_taxa_df)
+
+
+# Extract the columns with ASV counts (assuming these are all columns except the taxonomy columns)
+asv_columns <- colnames(abundance_taxa_df)[grepl("^primers-trimmed", colnames(abundance_taxa_df))]
+
+# Convert these columns to numeric
+abundance_taxa_df[asv_columns] <- lapply(abundance_taxa_df[asv_columns], as.numeric)
+
+# Pivot longer to get sample-wise counts
+abundance_long <- abundance_taxa_df %>%
+  pivot_longer(cols = starts_with("primers-trimmed"), names_to = "Sample", values_to = "Abundance")
+
+library(dplyr)
+
+# Group by Genus and summarize total abundance across all samples
+abundance_grouped_genus <- abundance_long %>%
+  group_by(Genus) %>%
+  summarize(Total_Abundance = sum(Abundance, na.rm = TRUE), .groups = 'drop')
+
+# Group by Genus and Sample, then summarize the abundance
+abundance_grouped_genus_sample <- abundance_long %>%
+  group_by(Genus, Sample) %>%
+  summarize(Abundance_Per_Sample = sum(Abundance, na.rm = TRUE), .groups = 'drop')
+
+# View the result
+head(abundance_grouped_genus)
+
+
+# Identify the top 10 genera by total abundance, excluding NA genera
+top_10_genera <- abundance_long %>%
+  filter(!is.na(Genus)) %>%          # Exclude NA values in Genus
+  group_by(Genus) %>%
+  summarize(Total_Abundance = sum(Abundance)) %>%
+  top_n(10, Total_Abundance) %>%
+  pull(Genus)
+
+# 1. Filter the data to include only the top 20 genera
+abundance_top10 <- abundance_grouped_genus_sample %>%
+  filter(Genus %in% top_10_genera)
+
+colnames(abundance_top10)[colnames(abundance_top10) == "Abundance_Per_Sample"] <- "Abundance"
+
+
+# 2. Calculate total abundance for each sample
+total_abundance <- abundance_top10 %>%
+  group_by(Sample) %>%
+  summarize(Total_Abundance = sum(Abundance, na.rm = TRUE))
+
+# 3. Calculate relative abundance
+abundance_relative <- abundance_top10 %>%
+  left_join(total_abundance, by = "Sample") %>%
+  mutate(Relative_Abundance = Abundance / Total_Abundance)
+
+# 4. Update metadata column name
+metadata_df <- ps_nochloro@sam_data
+colnames(metadata_df)[colnames(metadata_df) == "seq_file"] <- "Sample"
+
+# Merge with metadata
+full_data <- abundance_relative %>%
+  left_join(metadata_df, by = "Sample")
+
+# Optionally, pivot back to wide format for visualization or further analysis
+abundance_relative_wide <- abundance_relative %>%
+  pivot_wider(
+    names_from = Sample,
+    values_from = Relative_Abundance
+  )
+
+library(ggplot2)
+
+full_data <- full_data %>% filter(!is.na(wgs.class))
+
+genus_palette <- c(
+  "Catellicoccus" = "#E41A1C", "Clostridium sensu stricto 1" = "#377EB8", "Corynebacterium" = "#4DAF4A",
+  "Cronobacter" = "#984EA3", "Enterobacillus" = "#FF7F00", "Enterobacter" = "#FFED6F",
+  "Enterococcus" = "#A65628", "Exiguobacterium" = "#F781BF", "Lactococcus" = "#CCEBC5",
+  "Latilactobacillus" = "#66C2A5", "Mycoplasma" = "#FB9A99", "Pseudomonas" = "#FDB462", "Rickettsiella" = "#B3DE69", "Romboutsia" = "#FCCDE5", "Staphylococcus" = "#D9D9D9", "Ureaplasma" = "#CAB2D6", "Serratia" = "cyan2")
+
+
+# Calculate total abundance globally (across all samples) for each Genus
+genus_abundance_order <- full_data %>%
+  group_by(Genus) %>%
+  summarize(Total_Abundance = sum(Relative_Abundance, na.rm = TRUE)) %>%
+  arrange(-Total_Abundance) %>%
+  pull(Genus)
+
+# Reorder Genus globally based on the total abundance across all samples
+full_data <- full_data %>%
+  mutate(Genus = factor(Genus, levels = genus_abundance_order))
+
+# Create the stacked bar plot with globally ordered genera
+top10genera <- ggplot(full_data, aes(x = Genus, y = Relative_Abundance, fill = Genus)) +
+  geom_bar(stat = "identity") +
+  theme(axis.text.x = element_text(angle = 90, hjust = 1)) +
+  scale_fill_manual(values = genus_palette) +  # Apply the custom palette
+  facet_wrap(~wgs.class) +
+  labs(x = NULL, y = "% of 16S rRNA gene copies recovered", 
+       title = "Top 20 Most Abundant Genera Across Samples") +
+  ylim(0, 15) +   # Set the y-axis to go up to 15
+  theme_minimal() +
+  theme(axis.text.x = element_blank(),        # Remove x-axis text
+        axis.ticks.x = element_blank(),       # Remove x-axis ticks
+        legend.position = "bottom")
+
+print(top10genera)
+```
+
+
+
+
+
