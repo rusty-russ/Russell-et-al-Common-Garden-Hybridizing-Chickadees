@@ -256,8 +256,6 @@ ps_nochloro <- ps %>%
 
 ```
 
-
-
 subsetting time points and species groups 
 ```{r}
 
@@ -422,7 +420,7 @@ bray <- phyloseq::distance(ps_nochloro, method = "bray")
 jaccard <- phyloseq::distance(ps_nochloro, method = "jaccard")
 
 #perform PERMANOVA
-permanova_result <- adonis2(bray ~ wgs.class+collection_time+Collection_year+Sex, data = meta_data, permutations = 10000, na.action = "na.exclude", by = "margin", strata = meta_data$band_id)
+permanova_result <- adonis2(bray ~ wgs.class+collection_time+Collection_year+Sex, data = meta_data, permutations = 10000, na.action = "na.exclude", by = "margin")
 print(permanova_result)
 
 #perform PERMANOVA
@@ -437,8 +435,9 @@ graph for alpha diversity differences
 ```{r}
 #cleaner graph for collection time on x axis and alpha diversity on the y axis 
 library(ggplot2)
+library(cowplot)
 
-asvnum1 <- ggplot(diversity_df, aes(x = wgs.class, y = OTUs, fill = wgs.class)) +
+asvnum1 <- ggplot(diversity_df, aes(x = new_wgs, y = Shannon, fill = new_wgs)) +
   geom_boxplot() +
   labs(
     x = "Ancestry",
@@ -466,6 +465,10 @@ asvnum1 <- ggplot(diversity_df, aes(x = wgs.class, y = OTUs, fill = wgs.class)) 
   theme_cowplot(12)
 
 print(asvnum1)
+
+pdf(paste("/Users/russ/Desktop/asvnum1.pdf"), width = 10, height = 10)
+print(asvnum1)
+dev.off()
 ```
 
 
@@ -494,18 +497,24 @@ point_colors <- c("initial" = "", "self_feeding" = "", "pre_surgery" = "")
 fill_colors <- c("BCCH" = "aquamarine3", "HYCH" = "chocolate1", "ADV.CA" = "cornflowerblue", "CACH" = "pink3")
 
 # Create the PCoA plot
-pcoa_plot <- plot_ordination(ps_nochloro_filtered, ordination, type = "samples") +
-  geom_point(aes(shape = collection_time, color = wgs.class), size = 3) +  
-  stat_ellipse(aes(group = wgs.class, fill = wgs.class), 
+pcoa_plot <- plot_ordination(ps_nochloro, ordination, type = "samples") +
+  geom_point(aes(shape = collection_time, color = new_wgs), size = 3) +  
+  stat_ellipse(aes(group = new_wgs, fill = new_wgs), 
                geom = "polygon", alpha = 0.2) +   
-  scale_fill_manual(values = fill_colors) +  # Provide colors for ellipses
-  scale_color_manual(values = fill_colors) + # Provide colors for points
+  #scale_fill_manual(values = fill_colors) +  # Provide colors for ellipses
+  #scale_color_manual(values = fill_colors) + # Provide colors for points
   theme_minimal() +
   labs(title = "PCoA of Microbial Communities",
        shape = "Collection Time", color = "Collection Time")
 
 # Display the plot
 print(pcoa_plot)
+
+
+# Save the plot to a PDF
+pdf("/Users/russ/Desktop/pcoa_plot.pdf", width = 15, height = 10)
+print(pcoa_plot)
+dev.off()
 
 ```
 
@@ -569,9 +578,9 @@ abund_long <- abund_long %>%
 
 # Summarize relative abundance by wgs.class and Nest_Site
 abund_wgs <- abund_long %>%
-  group_by(wgs.class, ASV) %>%
+  group_by(new_wgs, ASV) %>%
   summarize(RelativeAbundance = mean(RelativeAbundance, na.rm = TRUE)) %>%
-  arrange(wgs.class, desc(RelativeAbundance))
+  arrange(new_wgs, desc(RelativeAbundance))
 
 abund_nest <- abund_long %>%
   group_by(Nest_Site, ASV) %>%
@@ -583,7 +592,7 @@ top_n <- 10
 
 # Top ASVs for each wgs.class
 top_asvs_wgs <- abund_wgs %>%
-  group_by(wgs.class) %>%
+  group_by(new_wgs) %>%
   slice_max(order_by = RelativeAbundance, n = top_n, with_ties = FALSE) %>%
   ungroup()
 
@@ -615,9 +624,9 @@ top_asvs_wgs <- top_asvs_wgs %>%
 
 
 # Plot top ASVs for each Nest_Site based on relative abundance
-wgs.class_chloro_asv<-ggplot(top_asvs_wgs, aes(x = reorder(ShortName, RelativeAbundance), y = RelativeAbundance, fill = wgs.class)) +
+wgs.class_chloro_asv<-ggplot(top_asvs_wgs, aes(x = reorder(ShortName, RelativeAbundance), y = RelativeAbundance, fill = new_wgs)) +
   geom_bar(stat = "identity") +
-  facet_wrap(~ wgs.class, scales = "free_x") +
+  facet_wrap(~ new_wgs, scales = "free_x") +
   labs(x = "ASV", y = "Relative Abundance", title = "Top 10 ASVs for Each Species Group (Relative Abundance)") +
   theme(axis.text.x = element_text(angle = 90, hjust = 1), legend.position = "none") +
   scale_fill_brewer(palette = "Set3")
@@ -653,25 +662,25 @@ running PERMANOVA stats chloro phyloseq
 library(vegan)
 
 #set meta_data
-meta_data<-sample_data(chloro_ps)
-meta_data <- data.frame(as(meta_data, "matrix"))
+meta_data_chloro<-sample_data(chloro_ps)
+meta_data_chloro <- data.frame(as(meta_data, "matrix"))
 
 
 # Bray-Curtis dissimilarity
-bray <- phyloseq::distance(chloro_ps, method = "bray")
+bray_chloro <- phyloseq::distance(chloro_ps, method = "bray")
 
 # Jaccard dissimilarity
-jaccard <- phyloseq::distance(chloro_ps, method = "jaccard")
+jaccard_chloro <- phyloseq::distance(chloro_ps, method = "jaccard")
 
 # Add a small value to all zero entries
-bray[bray == 0] <- 0.0001
-bray[is.na(bray)] <- 0.0001
+bray_chloro[bray_chloro == 0] <- 0.0001
+bray_chloro[is.na(bray_chloro)] <- 0.0001
 
-jaccard[jaccard == 0] <- 0.0001
-jaccard[is.na(jaccard)] <- 0.0001
+jaccard_chloro[jaccard_chloro == 0] <- 0.0001
+jaccard_chloro[is.na(jaccard_chloro)] <- 0.0001
 
 #perform PERMANOVA
-permanova_result <- adonis2(bray ~ wgs.class+Collection_year+Sex+collection_time, data = meta_data, permutations = 10000, na.action = "na.exclude", by = "margin")
+permanova_result <- adonis2(jaccard_chloro ~ wgs.class+Sex+collection_time, data = meta_data_chloro, permutations = 10000, na.action = "na.exclude", by = "margin")
 print(permanova_result)
 
 ```
@@ -679,30 +688,30 @@ print(permanova_result)
 
 alpha diversity of chloroplast 
 ```{r}
-shannon_diversity<-estimate_richness(presurg_chloro_ps, measures = "shannon")
-inverse_simpson_index <- estimate_richness(presurg_chloro_ps, measures = "InvSimpson")
-chao1<- estimate_richness(presurg_chloro_ps, measures = "Chao1")
-richness<- estimate_richness(presurg_chloro_ps, measures = "Observed")
+shannon_diversity<-estimate_richness(chloro_ps, measures = "shannon")
+inverse_simpson_index <- estimate_richness(chloro_ps, measures = "InvSimpson")
+chao1<- estimate_richness(chloro_ps, measures = "Chao1")
+richness<- estimate_richness(chloro_ps, measures = "Observed")
 
 # Calculate diversity measures
 diversity_df_chloro <- data.frame(
-  SampleID = sample_names(presurg_chloro_ps),
-  Shannon = estimate_richness(presurg_chloro_ps, measures = "Shannon")[, "Shannon"],
-  Chao = estimate_richness(presurg_chloro_ps, measures = "Chao1")[, "Chao1"],
-  Richness = estimate_richness(presurg_chloro_ps, measures = "Observed")[, "Observed"],
-  OTUs = otu_table(presurg_chloro_ps) %>% rowSums()
+  SampleID = sample_names(chloro_ps),
+  Shannon = estimate_richness(chloro_ps, measures = "Shannon")[, "Shannon"],
+  Chao = estimate_richness(chloro_ps, measures = "Chao1")[, "Chao1"],
+  Richness = estimate_richness(chloro_ps, measures = "Observed")[, "Observed"],
+  OTUs = otu_table(chloro_ps) %>% rowSums()
 )
 
 #making the metadata object and confirming dataframes 
-meta_data<-sample_data(presurg_chloro_ps)
-meta_data <- data.frame(as(meta_data, "matrix"))
+meta_data_chloro<-sample_data(chloro_ps)
+meta_data_chloro <- data.frame(as(meta_data, "matrix"))
 diversity_df_chloro<-as.data.frame(diversity_df_chloro)
 
 # Rename seq_file to SampleID in meta_data
-colnames(meta_data)[colnames(meta_data) == "seq_file"] <- "SampleID"
+colnames(meta_data_chloro)[colnames(meta_data_chloro) == "seq_file"] <- "SampleID"
 
 # Combine with metadata
-diversity_df_chloro <- merge(diversity_df_chloro, meta_data, by = "SampleID")
+diversity_df_chloro <- merge(diversity_df_chloro, meta_data_chloro, by = "SampleID")
 
 # Filter out NAs
 diversity_df_chloro <- diversity_df_chloro %>%
@@ -729,23 +738,35 @@ diversity_df_chloro$Nest<-as.factor(diversity_df_chloro$Nest)
 
 #SHANNON DIVERSITY
 #simplified version
-shan.init <- lmer(Shannon ~ wgs.class + Nest_Site + Collection_year + (1|Nest) + (1|Sex), data = diversity_df_chloro)
+shan.init <- lmer(Shannon ~ wgs.class*Sex*collection_time + (1|Collection_year/Nest), data = diversity_df_chloro)
 summary(shan.init)
 #check the Anova 
 Anova(shan.init)
-
+shan.init.ms <- update(shan.init, ~ . 
+  - wgs.class:Sex
+  -wgs.class:collection_time
+  -Sex:collection_time
+  -wgs.class:Sex:collection_time)
+anova(shan.init.ms,shan.init)
+Anova(shan.init.ms)
 
 #CHAO DIVERSITY
 #simplified version
-chao.init <- lmer(Chao ~ wgs.class + Nest_Site + Collection_year +  (1|Nest) + (1|Sex), data = diversity_df_chloro)
+chao.init <- lmer(Chao ~ wgs.class*Sex*collection_time + (1|Collection_year/Nest), data = diversity_df_chloro)
 summary(chao.init)
 #check the Anova 
 Anova(chao.init)
-
+chao.init.ms <- update(chao.init, ~ . 
+  - wgs.class:Sex
+  -wgs.class:collection_time
+  -Sex:collection_time
+  -wgs.class:Sex:collection_time)
+anova(chao.init.ms,chao.init)
+Anova(chao.init.ms)
 
 #OBSERVED RICHNESS
 #simplified version
-rich.full <- lmer(Richness ~ wgs.class + Nest_Site + Collection_year + (1|Nest) + (1|Sex), data = diversity_df_chloro)
+rich.full <- lmer(Richness ~ wgs.class*Sex*collection_time + (1|Collection_year/Nest), data = diversity_df_chloro)
 summary(rich.full)
 #check the Anova 
 Anova(rich.full)
@@ -753,10 +774,20 @@ Anova(rich.full)
 
 #NUMBER OF ASVs
 #simplified version
-asvnum.init <- lmer(OTUs ~ wgs.class + Nest_Site + Collection_year +  (1|Nest) + (1|Sex), data = diversity_df_chloro)
+asvnum.init <- lmer(OTUs ~ wgs.class*Sex*collection_time + (1|Collection_year/Nest), data = diversity_df_chloro)
 summary(asvnum.init)
 #check the Anova 
 Anova(asvnum.init)
+asvnum.init.ms <- update(asvnum.init, ~ . 
+  - wgs.class:Sex
+  -wgs.class:collection_time
+  -Sex:collection_time
+  -wgs.class:Sex:collection_time)
+anova(asvnum.init.ms,asvnum.init)
+Anova(asvnum.init.ms)
+
+
+
 
 ```
 
@@ -862,16 +893,18 @@ print(res_global_stats)
 finding the significant asv and putting them in their own object for a differential abundance graph 
 ```{r}
 
-# Step 1: Access and modify the sample data
+ancomb_ps<-ps_nochloro
+
+#access and modify the sample data
 ancomb_ps@sam_data$wgs.class <- as.factor(ancomb_ps@sam_data$wgs.class)
 
-# Step 2: Filter out samples with NA in wgs.class
+# filter out samples with NA in wgs.class
 filtered_samples_wgs <- !is.na(sample_data(ancomb_ps)$wgs.class)
 
-# Step 3: Prune the phyloseq object to only keep samples without NA in wgs.class
+# prune the phyloseq object to only keep samples without NA in wgs.class
 ancomb_ps_filtered_wgs <- prune_samples(filtered_samples_wgs, ancomb_ps)
 
-# Step 4: Run ANCOMBC analysis across the wgs.class groups
+# run ANCOMBC analysis across the wgs.class groups
 full_ancombc_wgs <- ancombc2(
   data = ancomb_ps_filtered_wgs, 
   tax_level = "Genus", 
@@ -937,13 +970,13 @@ library(ggplot2)
 df_comparison <- df_results %>%
     dplyr::select(taxon, 
                   lfc_wgs.classHYCH, 
-                  lfc_wgs.classADV.CA,
+                  lfc_wgs.classBCCH,
                   lfc_wgs.classCACH,
                   se_wgs.classHYCH, 
-                  se_wgs.classADV.CA, 
+                  se_wgs.classBCCH, 
                   se_wgs.classCACH, 
                   passed_ss_wgs.classHYCH, 
-                  passed_ss_wgs.classADV.CA, 
+                  passed_ss_wgs.classBCCH, 
                   passed_ss_wgs.classCACH)
 
 # Create df_fig_comparison by pivoting the necessary columns
@@ -966,7 +999,7 @@ df_fig_comparison <- df_comparison %>%
     mutate(
         passed_ss = case_when(
             comparison == "HYCH" ~ passed_ss_wgs.classHYCH,
-            comparison == "ADV.CA" ~ passed_ss_wgs.classADV.CA,
+            comparison == "BCCH" ~ passed_ss_wgs.classBCCH,
             comparison == "CACH" ~ passed_ss_wgs.classCACH,
             TRUE ~ NA
         ),
@@ -1016,13 +1049,13 @@ library(ggplot2)
 df_comparison <- df_results %>%
     dplyr::select(taxon, 
                   lfc_wgs.classHYCH, 
-                  lfc_wgs.classADV.CA,
+                  lfc_wgs.classBCCH,
                   lfc_wgs.classCACH,
                   se_wgs.classHYCH, 
-                  se_wgs.classADV.CA, 
+                  se_wgs.classBCCH, 
                   se_wgs.classCACH, 
                   p_wgs.classHYCH,
-                  p_wgs.classADV.CA,
+                  p_wgs.classBCCH,
                   p_wgs.classCACH)
 
 # Create df_fig_comparison by pivoting the necessary columns
@@ -1051,7 +1084,7 @@ df_fig_comparison <- df_comparison %>%
     mutate(
         passed_ss = case_when(
             comparison == "HYCH" ~ p_value < 0.05,
-            comparison == "ADV.CA" ~ p_value < 0.05,
+            comparison == "BCCH" ~ p_value < 0.05,
             comparison == "CACH" ~ p_value < 0.05,
             TRUE ~ NA
         ),
@@ -1080,7 +1113,7 @@ fig_significant <- ggplot(df_significant, aes(x = reorder(taxon, log_fold_change
                   width = 0.2, position = position_dodge(0.4), color = "black") + 
     facet_wrap(~ comparison, scales = "free", ncol = 1) +  # Separate panels for each wgs.class comparison
     labs(x = NULL, y = "Log Fold Change", 
-         title = "Significant Genera in WGS Class Comparisons (HYCH, ADV.CA, CACH)") + 
+         title = "Significant Genera in WGS Class Comparisons (HYCH, BCCH, CACH)") + 
     scale_fill_discrete(name = NULL) +
     theme_bw() + 
     theme(
